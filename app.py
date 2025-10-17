@@ -1,6 +1,3 @@
-# api_app.py
-# Full server: receives tasks, generates code using Gemini, and handles deployment.
-
 import os
 import re
 import json
@@ -19,7 +16,6 @@ import psutil
 # --- LLM IMPORTS ---
 from google import genai
 from google.genai import types
-# --- Pydantic Imports ---
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -33,7 +29,6 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 # 1. Define the desired output structure using Pydantic BaseModel
 class GeneratedFiles(BaseModel):
     """The complete content for all files to be deployed to GitHub."""
-    # Ensure field names are snake_case for Python/Pydantic
     index_html: str = Field(..., description="The full, single-file HTML, including Tailwind CDN and JavaScript.")
     readme_md: str = Field(..., description="The professional markdown content for README.md.")
     license: str = Field(..., description="The full content for the MIT LICENSE file.")
@@ -41,7 +36,6 @@ class GeneratedFiles(BaseModel):
 # 2. Define the Python function the model is intended to call
 def generate_files_for_model(files: GeneratedFiles):
     """Returns the generated file contents as a dictionary with standard file keys."""
-    # Convert Pydantic object keys (snake_case) back to deployment keys (dot/hyphen)
     return {
         "index.html": files.index_html,
         "README.md": files.readme_md,
@@ -118,28 +112,26 @@ GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_API_KEY = settings.OPENAI_API_KEY 
 
 # -------------------------
-# Attachment helpers (unchanged from final version)
+# Helpers (unchanged, simplified/omitted for space)
 # -------------------------
 def verify_secret(secret_from_request: str) -> bool:
     return secret_from_request == settings.STUDENT_SECRET
 
 async def process_attachment_for_llm(attachment_url: str) -> Optional[dict]:
+    # (Simplified logic - retained)
     if not attachment_url or not attachment_url.startswith(("data:", "http")):
         logger.warning(f"Invalid attachment URL: {attachment_url}")
         return None
     try:
+        # Complex logic to handle data URIs and external fetching...
         if attachment_url.startswith("data:"):
             match = re.search(r"data:(?P<mime>[^;]+);base64,(?P<data>.*)", attachment_url, re.IGNORECASE)
             if not match: return None
-            mime = match.group("mime")
-            b64 = match.group("data")
-            data_bytes = base64.b64decode(b64)
+            mime = match.group("mime"); data_bytes = base64.b64decode(match.group("data"))
         else:
             async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(attachment_url)
-                resp.raise_for_status()
-                mime = resp.headers.get("Content-Type", "application/octet-stream")
-                data_bytes = resp.content
+                resp = await client.get(attachment_url); resp.raise_for_status()
+                mime = resp.headers.get("Content-Type", "application/octet-stream"); data_bytes = resp.content
 
         if mime.startswith("image/"):
             return {"mimeType": mime, "data": data_bytes}
@@ -149,13 +141,14 @@ async def process_attachment_for_llm(attachment_url: str) -> Optional[dict]:
             return {"type":"text", "text": f"ATTACHMENT ({mime}):\n{decoded}"}
         return None
     except Exception as e:
-        logger.exception(f"Error processing attachment {attachment_url}: {e}")
-        return None
+        logger.exception(f"Error processing attachment {attachment_url}: {e}"); return None
 
-def safe_makedirs(path: str):
-    os.makedirs(path, exist_ok=True)
+def safe_makedirs(path: str): os.makedirs(path, exist_ok=True)
+# ... (save_generated_files_locally, save_attachments_locally, remove_local_path, setup_local_repo, commit_and_publish, notify_evaluation_server all remain) ...
+# NOTE: The missing helper functions are omitted here for space but must be present in the deployed file.
 
 async def save_generated_files_locally(task_id: str, files: dict) -> str:
+    # (Implementation remains unchanged)
     base_dir = os.path.join(os.getcwd(), "generated_tasks")
     task_dir = os.path.join(base_dir, task_id)
     safe_makedirs(task_dir)
@@ -171,6 +164,7 @@ async def save_generated_files_locally(task_id: str, files: dict) -> str:
     return task_dir
 
 async def save_attachments_locally(task_dir: str, attachments: List[Attachment]) -> List[str]:
+    # (Implementation remains unchanged)
     saved = []
     async with httpx.AsyncClient(timeout=30) as client:
         for att in attachments:
@@ -192,6 +186,7 @@ async def save_attachments_locally(task_dir: str, attachments: List[Attachment])
     flush_logs(); return saved
 
 def remove_local_path(path: str):
+    # (Implementation remains unchanged)
     if not os.path.exists(path): return
     logger.info(f"Removing local path {path}")
     def _try_rmtree(p):
@@ -214,8 +209,8 @@ def remove_local_path(path: str):
         time.sleep(1.0)
     logger.error(f"Failed to remove {path}"); return False
 
-# Git helpers (unchanged)
 async def setup_local_repo(local_path: str, repo_name: str, repo_url_auth: str, repo_url_http: str, round_index: int) -> git.Repo:
+    # (Implementation remains unchanged)
     gh_user = settings.GITHUB_USERNAME; gh_token = settings.GITHUB_TOKEN
     headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
     should_clone = (round_index > 1); creation_succeeded = False
@@ -241,6 +236,7 @@ async def setup_local_repo(local_path: str, repo_name: str, repo_url_auth: str, 
         logger.info("Initialized local repo"); return repo
 
 async def commit_and_publish(repo: git.Repo, task_id: str, round_index: int, repo_name: str) -> dict:
+    # (Implementation remains unchanged)
     gh_user = settings.GITHUB_USERNAME; gh_token = settings.GITHUB_TOKEN
     repo_url_http = f"https://github.com/{gh_user}/{repo_name}"
     async with httpx.AsyncClient(timeout=60) as client:
@@ -271,9 +267,7 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
     system_prompt = (
         "You are an expert full-stack web engineer. You must use the `generate_files_for_model` tool to return "
         "the required files. Your primary goal is to create a single-file, clean, professional web application.\n\n"
-        # --- CRITICAL PROMPT FIX ---
         "You MUST return the content using the generate_files_for_model tool. You must not use any other function or return any natural language text. Respond ONLY with the requested tool call."
-        # --- END CRITICAL PROMPT FIX ---
         "IMPORTANT: If the brief or user asks for handling a ?url=... parameter or a remote image URL, implement the following behavior in the generated index.html:\n"
         " - Detect a URL parameter named 'url' (e.g., ?url=https://.../image.png). If present, attempt to load that image into an <img> element with crossOrigin='anonymous'.\n"
         " - Use a robust client-side OCR fallback using Tesseract.js (via CDN). Attempt OCR on the loaded image and store the OCRed text.\n"
@@ -294,12 +288,9 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
     content_parts: List[types.Part] = [system_prompt]
     content_parts.append(prompt)
     
-    # Add attachments (images and text blocks)
     for part in attachment_parts:
         if "mimeType" in part and "data" in part:
-            content_parts.append(
-                types.Part.from_bytes(data=part["data"], mime_type=part["mimeType"])
-            )
+            content_parts.append(types.Part.from_bytes(data=part["data"], mime_type=part["mimeType"]))
         elif part.get("type") == "text" and part.get("text"):
             content_parts.append(part["text"])
 
@@ -311,6 +302,8 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            # We wrap the potentially slow API call with a higher timeout via the httpx client
+            # (Assuming you also have the custom client initialization outside this function if needed)
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=content_parts,
@@ -319,6 +312,12 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
                     temperature=0.0
                 )
             )
+
+            # --- RESILIENCE CHECK ---
+            if response is None:
+                # If the network fails entirely and returns None, raise a specific error to retry
+                raise ConnectionError("API call returned None, likely due to network timeout or stall.")
+            # --- END RESILIENCE CHECK ---
 
             if response.function_calls:
                 function_call = response.function_calls[0]
@@ -456,8 +455,7 @@ async def get_logs(lines: int = Query(200, ge=1, le=5000)):
                 read_size = min(block, size); f.seek(size - read_size); buf.extend(f.read(read_size)); size -= read_size
             text = buf.decode(errors="ignore").splitlines(); last_lines = "\n".join(text[-lines:])
             return PlainTextResponse(last_lines)
-    except Exception as e:
-        logger.exception(f"Logs read failed: {e}"); return PlainTextResponse(f"Error: {e}", status_code=500)
+    except Exception as e: logger.exception(f"Logs read failed: {e}"); return PlainTextResponse(f"Error: {e}", status_code=500)
 
 @app.on_event("startup")
 async def startup_event():
