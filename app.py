@@ -1,6 +1,5 @@
 # app.py
-# Full server: receives tasks, calls OpenRouter/gpt-4.1-nano to generate files,
-# handles attachments, deploys to GitHub Pages, and supports robust captcha-solver UX.
+# Full server: receives tasks, generates code using Gemini, and handles deployment.
 
 import os
 import re
@@ -17,22 +16,42 @@ from datetime import datetime
 import httpx
 import git
 import psutil
-# --- UPDATED IMPORTS ---
-# Removed: from openai import OpenAI
+# --- LLM IMPORTS ---
 from google import genai
 from google.genai import types
-# -----------------------
+# --- Pydantic Imports ---
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings
+
+# -------------------------
+# Tool Schema Definition (Gemini Native)
+# -------------------------
+
+# 1. Define the desired output structure using Pydantic BaseModel
+class GeneratedFiles(BaseModel):
+    """The complete content for all files to be deployed to GitHub."""
+    index_html: str = Field(..., description="The full, single-file HTML, including Tailwind CDN and JavaScript.")
+    readme_md: str = Field(..., description="The professional markdown content for README.md.")
+    license: str = Field(..., description="The full content for the MIT LICENSE file.")
+
+# 2. Define the Python function the model is intended to call
+def generate_files_for_model(files: GeneratedFiles):
+    """Returns the generated file contents as a dictionary with standard file keys."""
+    # Convert Pydantic object keys (snake_case) back to deployment keys (dot/hyphen)
+    return {
+        "index.html": files.index_html,
+        "README.md": files.readme_md,
+        "LICENSE": files.license,
+    }
 
 # -------------------------
 # Settings
 # -------------------------
 class Settings(BaseSettings):
-    # NOTE: This env var holds the Gemini API Key value
+    # OPENAI_API_KEY holds the Gemini API Key value
     OPENAI_API_KEY: str = Field("", env="OPENAI_API_KEY") 
     GITHUB_TOKEN: str = Field("", env="GITHUB_TOKEN")
     GITHUB_USERNAME: str = Field("", env="GITHUB_USERNAME")
@@ -52,7 +71,7 @@ if not settings.GITHUB_PAGES_BASE:
     settings.GITHUB_PAGES_BASE = f"https://{settings.GITHUB_USERNAME}.github.io"
 
 # -------------------------
-# Logging
+# Logging and standard helpers (unchanged)
 # -------------------------
 os.makedirs(os.path.dirname(settings.LOG_FILE_PATH), exist_ok=True)
 logger = logging.getLogger("task_receiver")
@@ -103,81 +122,41 @@ background_tasks_list: List[asyncio.Task] = []
 task_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TASKS)
 last_received_task: Optional[dict] = None
 
-# --- NEW GEMINI CONSTANTS ---
 GEMINI_MODEL = "gemini-2.5-flash"
-# ----------------------------
-
-# Converted tool schema to Google GenAI format (Python dictionary format)
-GENERATED_CODE_TOOL = {
-    "name": "generate_files",
-    "description": "Return JSON with index.html, README.md, and LICENSE file contents.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "index.html": {"type": "string", "description": "Single file HTML/JS/CSS"},
-            "README.md": {"type": "string", "description": "README content"},
-            "LICENSE": {"type": "string", "description": "MIT license content"}
-        },
-        "required": ["index.html", "README.md", "LICENSE"],
-        "additionalProperties": False
-    }
-}
+GEMINI_API_KEY = settings.OPENAI_API_KEY # Key is read from this environment variable
 
 # -------------------------
-# Helpers
+# Attachment helpers (unchanged)
 # -------------------------
 def verify_secret(secret_from_request: str) -> bool:
     return secret_from_request == settings.STUDENT_SECRET
 
-async def fetch_url_as_base64(url: str, timeout: int = 20) -> Optional[Dict[str,str]]:
-    # This function is not used in the final Gemini call logic but remains for attachment helpers
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            content_type = r.headers.get("Content-Type", "application/octet-stream")
-            b64 = base64.b64encode(r.content).decode("utf-8")
-            return {"mime": content_type, "b64": b64}
-    except Exception as e:
-        logger.warning(f"Failed to fetch {url}: {e}")
-        return None
-
-# Process attachments: return either image inlineData or text block
-# This function is adapted to return parts compatible with Gemini's content list structure
 async def process_attachment_for_llm(attachment_url: str) -> Optional[dict]:
+    # (Simplified for brevity, but assumes the logic that returns mimeType and data bytes)
     if not attachment_url or not attachment_url.startswith(("data:", "http")):
         logger.warning(f"Invalid attachment URL: {attachment_url}")
         return None
     try:
         if attachment_url.startswith("data:"):
             match = re.search(r"data:(?P<mime>[^;]+);base64,(?P<data>.*)", attachment_url, re.IGNORECASE)
-            if not match:
-                return None
+            if not match: return None
             mime = match.group("mime")
             b64 = match.group("data")
-            if mime.startswith("image/"):
-                # Returns base64 part object (used later to construct content list)
-                return {"mimeType": mime, "data": base64.b64decode(b64)}
-            else:
-                decoded = base64.b64decode(b64).decode("utf-8", errors="ignore")
-                if len(decoded) > 20000:
-                    decoded = decoded[:20000] + "\n\n...TRUNCATED..."
-                return {"type": "text", "text": f"ATTACHMENT ({mime}):\n{decoded}"}
+            data_bytes = base64.b64decode(b64)
         else:
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.get(attachment_url)
                 resp.raise_for_status()
                 mime = resp.headers.get("Content-Type", "application/octet-stream")
-                content_bytes = resp.content
-                if mime and mime.startswith("image/"):
-                    return {"mimeType": mime, "data": content_bytes}
-                lower = attachment_url.lower()
-                if mime in ("text/csv", "application/json", "text/plain") or lower.endswith((".csv", ".json", ".txt")):
-                    decoded = content_bytes.decode("utf-8", errors="ignore")
-                    if len(decoded) > 20000:
-                        decoded = decoded[:20000] + "\n\n...TRUNCATED..."
-                    return {"type":"text", "text": f"ATTACHMENT ({mime}):\n{decoded}"}
-                return None
+                data_bytes = resp.content
+
+        if mime.startswith("image/"):
+            return {"mimeType": mime, "data": data_bytes}
+        elif mime in ("text/csv", "application/json", "text/plain") or attachment_url.lower().endswith((".csv", ".json", ".txt")):
+            decoded = data_bytes.decode("utf-8", errors="ignore")
+            if len(decoded) > 20000: decoded = decoded[:20000] + "\n\n...TRUNCATED..."
+            return {"type":"text", "text": f"ATTACHMENT ({mime}):\n{decoded}"}
+        return None
     except Exception as e:
         logger.exception(f"Error processing attachment {attachment_url}: {e}")
         return None
@@ -192,7 +171,6 @@ async def save_generated_files_locally(task_id: str, files: dict) -> str:
     logger.info(f"Saving generated files to {task_dir}")
     for fname, content in files.items():
         p = os.path.join(task_dir, fname)
-        # Ensure content is a string before writing
         if isinstance(content, str):
              await asyncio.to_thread(lambda p, c: open(p, "w", encoding="utf-8").write(c), p, content)
              logger.info(f"  saved {fname}")
@@ -202,6 +180,7 @@ async def save_generated_files_locally(task_id: str, files: dict) -> str:
     return task_dir
 
 async def save_attachments_locally(task_dir: str, attachments: List[Attachment]) -> List[str]:
+    # (Unchanged logic for saving raw attachment files)
     saved = []
     async with httpx.AsyncClient(timeout=30) as client:
         for att in attachments:
@@ -224,21 +203,16 @@ async def save_attachments_locally(task_dir: str, attachments: List[Attachment])
     flush_logs()
     return saved
 
+
 def remove_local_path(path: str):
-    if not os.path.exists(path):
-        return
+    # (Unchanged robust cleanup logic)
+    if not os.path.exists(path): return
     logger.info(f"Removing local path {path}")
     def _try_rmtree(p):
-        try:
-            shutil.rmtree(p)
-            return True
-        except Exception as e:
-            logger.warning(f"rmtree attempt failed: {e}")
-            return False
+        try: shutil.rmtree(p); return True
+        except Exception as e: logger.warning(f"rmtree attempt failed: {e}"); return False
     for i in range(6):
-        if _try_rmtree(path):
-            return True
-        # try to terminate processes holding files under path (Windows)
+        if _try_rmtree(path): return True
         try:
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
@@ -248,17 +222,13 @@ def remove_local_path(path: str):
                                 logger.warning(f"Terminating process {proc.pid} ({proc.name()}) holding {f.path}")
                                 try: proc.terminate()
                                 except Exception: pass
-                        except Exception:
-                            continue
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-        except Exception:
-            pass
+                        except Exception: continue
+                except (psutil.NoSuchProcess, psutil.AccessDenied): continue
+        except Exception: pass
         time.sleep(1.0)
-    logger.error(f"Failed to remove {path}")
-    return False
+    logger.error(f"Failed to remove {path}"); return False
 
-# Git helpers (functions are unchanged, but rely on settings.GITHUB_TOKEN)
+# Git helpers (unchanged)
 async def setup_local_repo(local_path: str, repo_name: str, repo_url_auth: str, repo_url_http: str, round_index: int) -> git.Repo:
     gh_user = settings.GITHUB_USERNAME
     gh_token = settings.GITHUB_TOKEN
@@ -270,32 +240,24 @@ async def setup_local_repo(local_path: str, repo_name: str, repo_url_auth: str, 
             try:
                 payload = {"name": repo_name, "private": False, "auto_init": True}
                 r = await client.post(f"{settings.GITHUB_API_BASE}/user/repos", json=payload, headers=headers)
-                if r.status_code == 201:
-                    creation_succeeded = True
+                if r.status_code == 201: creation_succeeded = True
                 elif r.status_code == 422:
                     msg = r.json().get("message", "")
-                    if "already exists" in msg:
-                        should_clone = True
-                    else:
-                        r.raise_for_status()
-                else:
-                    r.raise_for_status()
+                    if "already exists" in msg: should_clone = True
+                    else: r.raise_for_status()
+                else: r.raise_for_status()
             except Exception as e:
-                logger.exception(f"Repo create error: {e}")
-                raise
+                logger.exception(f"Repo create error: {e}"); raise
     if should_clone or (round_index > 1 and not creation_succeeded):
         try:
             repo = await asyncio.to_thread(git.Repo.clone_from, repo_url_auth, local_path)
-            logger.info("Cloned repo")
-            return repo
+            logger.info("Cloned repo"); return repo
         except Exception as e:
-            logger.exception(f"Clone failed: {e}")
-            raise
+            logger.exception(f"Clone failed: {e}"); raise
     else:
         repo = git.Repo.init(local_path)
         repo.create_remote('origin', repo_url_auth)
-        logger.info("Initialized local repo")
-        return repo
+        logger.info("Initialized local repo"); return repo
 
 async def commit_and_publish(repo: git.Repo, task_id: str, round_index: int, repo_name: str) -> dict:
     gh_user = settings.GITHUB_USERNAME
@@ -309,39 +271,33 @@ async def commit_and_publish(repo: git.Repo, task_id: str, round_index: int, rep
             commit_sha = getattr(commit, "hexsha", "")
             await asyncio.to_thread(lambda *args: repo.git.branch(*args), '-M', 'main')
             await asyncio.to_thread(lambda r: r.git.push('--set-upstream', 'origin', 'main', force=True), repo)
-            # configure pages
             await asyncio.sleep(2)
             pages_api = f"{settings.GITHUB_API_BASE}/repos/{gh_user}/{repo_name}/pages"
             payload = {"source": {"branch": "main", "path": "/"}}
             for attempt in range(5):
                 try:
                     resp = await client.get(pages_api, headers={"Authorization": f"token {gh_token}"})
-                    if resp.status_code == 200:
-                        await client.put(pages_api, json=payload, headers={"Authorization": f"token {gh_token}"})
-                    else:
-                        await client.post(pages_api, json=payload, headers={"Authorization": f"token {gh_token}"})
+                    if resp.status_code == 200: await client.put(pages_api, json=payload, headers={"Authorization": f"token {gh_token}"})
+                    else: await client.post(pages_api, json=payload, headers={"Authorization": f"token {gh_token}"})
                     break
                 except httpx.HTTPStatusError as e:
                     text = e.response.text.lower() if e.response and e.response.text else ""
                     if e.response.status_code == 422 and "main branch must exist" in text and attempt < 4:
-                        await asyncio.sleep(2 ** attempt)
-                        continue
+                        await asyncio.sleep(2 ** attempt); continue
                     raise
             await asyncio.sleep(5)
             pages_url = f"{settings.GITHUB_PAGES_BASE}/{repo_name}/"
             return {"repo_url": repo_url_http, "commit_sha": commit_sha, "pages_url": pages_url}
         except Exception as e:
-            logger.exception(f"Commit/publish failed: {e}")
-            raise
-
+            logger.exception(f"Commit/publish failed: {e}"); raise
 
 # LLM wrapper is now Gemini native (using the key stored in OPENAI_API_KEY)
 async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[dict]) -> dict:
     logger.info(f"[LLM] Generating code for {task_id} using model: {GEMINI_MODEL}")
     system_prompt = (
-        "You are an expert full-stack web engineer. You must use the `generate_files` tool to return "
+        "You are an expert full-stack web engineer. You must use the `generate_files_for_model` tool to return "
         "the required files. Your primary goal is to create a single-file, clean, professional web application.\n\n"
-        # ... (rest of the prompt logic is the same) ...
+        # ... (rest of the prompt remains the same) ...
         "IMPORTANT: If the brief or user asks for handling a ?url=... parameter or a remote image URL, implement the following behavior in the generated index.html:\n"
         " - Detect a URL parameter named 'url' (e.g., ?url=https://.../image.png). If present, attempt to load that image into an <img> element with crossOrigin='anonymous'.\n"
         " - Use a robust client-side OCR fallback using Tesseract.js (via CDN). Attempt OCR on the loaded image and store the OCRed text.\n"
@@ -357,11 +313,10 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
         " index.html: single-file HTML using Tailwind CDN + vanilla JS + Tesseract.js via CDN. Must reference any attached image file by filename in the root (./<name>) and include base64 fallback.\n"
         " README.md: describe the app, mention attachment usage, and Live Demo link.\n"
         " LICENSE: MIT with [year] and [author].\n"
-        "You MUST return the content using the generate_files tool. Do not generate any text or code outside the tool call."
+        "You MUST return the content using the generate_files_for_model tool. Do not generate any text or code outside the tool call."
     )
 
-    # Convert attachments into Gemini Content objects
-    content_parts: List[types.Part] = []
+    content_parts: List[types.Part] = [system_prompt]
     
     # Add initial text prompt
     content_parts.append(prompt)
@@ -369,12 +324,10 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
     # Add attachments (images and text blocks)
     for part in attachment_parts:
         if "mimeType" in part and "data" in part:
-            # Image part (data is already bytes/base64 decoded)
             content_parts.append(
                 types.Part.from_bytes(data=part["data"], mime_type=part["mimeType"])
             )
         elif part.get("type") == "text" and part.get("text"):
-            # Text part (attachment metadata/content)
             content_parts.append(part["text"])
 
     try:
@@ -391,32 +344,29 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
                 model=GEMINI_MODEL,
                 contents=content_parts,
                 config=types.GenerateContentConfig(
-                    tools=[GENERATED_CODE_TOOL],
+                    tools=[generate_files_for_model], # Pass the Python callable directly
                     temperature=0.0
                 )
             )
 
-            # Check if the model called the function
             if response.function_calls:
                 function_call = response.function_calls[0]
-                if function_call.name == "generate_files":
+                if function_call.name == "generate_files_for_model":
                     # Function arguments are structured data
                     generated = dict(function_call.args)
                     
-                    # Basic validation
-                    for k in ("index.html", "README.md", "LICENSE"):
-                        if k not in generated:
-                            raise ValueError(f"Missing {k} in LLM output")
+                    # Basic validation and key standardization
+                    final_files = {}
+                    for model_key, deploy_key in [("index_html", "index.html"), ("readme_md", "README.md"), ("license", "LICENSE")]:
+                        if model_key not in generated:
+                            raise ValueError(f"Missing required argument in model call: {model_key}")
+                        final_files[deploy_key] = str(generated[model_key])
                     
-                    # Ensure all values are converted to strings if needed
-                    final_files = {k: str(v) for k, v in generated.items()}
-
                     logger.info(f"[LLM] Successfully generated files on attempt {attempt+1}")
                     return final_files
                 else:
                     raise ValueError(f"Model called unexpected function: {function_call.name}")
             else:
-                 # Check if the model failed to call the function but returned text/error
                  if response.candidates and response.candidates[0].content and response.candidates[0].content.parts[0].text:
                      error_text = response.candidates[0].content.parts[0].text
                      raise ValueError(f"LLM did not call tool. Response: {error_text[:100]}...")
@@ -424,7 +374,6 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
                      raise ValueError("LLM did not call tool and returned no content.")
 
         except Exception as e:
-            # Catch API errors (e.g., 400 Bad Request) or internal logic errors
             logger.warning(f"[LLM] Attempt {attempt+1} error: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
