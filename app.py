@@ -1,4 +1,4 @@
-# app.py
+# api_app.py
 # Full server: receives tasks, generates code using Gemini, and handles deployment.
 
 import os
@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 # 1. Define the desired output structure using Pydantic BaseModel
 class GeneratedFiles(BaseModel):
     """The complete content for all files to be deployed to GitHub."""
+    # Ensure field names are snake_case for Python/Pydantic
     index_html: str = Field(..., description="The full, single-file HTML, including Tailwind CDN and JavaScript.")
     readme_md: str = Field(..., description="The professional markdown content for README.md.")
     license: str = Field(..., description="The full content for the MIT LICENSE file.")
@@ -51,7 +52,7 @@ def generate_files_for_model(files: GeneratedFiles):
 # Settings
 # -------------------------
 class Settings(BaseSettings):
-    # OPENAI_API_KEY holds the Gemini API Key value
+    # OPENAI_API_KEY holds the Gemini API Key value in Render environment
     OPENAI_API_KEY: str = Field("", env="OPENAI_API_KEY") 
     GITHUB_TOKEN: str = Field("", env="GITHUB_TOKEN")
     GITHUB_USERNAME: str = Field("", env="GITHUB_USERNAME")
@@ -71,7 +72,7 @@ if not settings.GITHUB_PAGES_BASE:
     settings.GITHUB_PAGES_BASE = f"https://{settings.GITHUB_USERNAME}.github.io"
 
 # -------------------------
-# Logging and standard helpers (unchanged)
+# Logging, Models, App & globals (standard)
 # -------------------------
 os.makedirs(os.path.dirname(settings.LOG_FILE_PATH), exist_ok=True)
 logger = logging.getLogger("task_receiver")
@@ -90,16 +91,10 @@ def flush_logs():
         sys.stdout.flush()
         sys.stderr.flush()
         for h in logger.handlers:
-            try:
-                h.flush()
-            except Exception:
-                pass
-    except Exception:
-        pass
+            try: h.flush()
+            except Exception: pass
+    except Exception: pass
 
-# -------------------------
-# Models
-# -------------------------
 class Attachment(BaseModel):
     name: str
     url: str
@@ -114,25 +109,21 @@ class TaskRequest(BaseModel):
     secret: str
     attachments: List[Attachment] = []
 
-# -------------------------
-# App & globals
-# -------------------------
 app = FastAPI(title="AI Web App Builder", description="Generate & deploy single-file web apps via Gemini")
 background_tasks_list: List[asyncio.Task] = []
 task_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TASKS)
 last_received_task: Optional[dict] = None
 
 GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_KEY = settings.OPENAI_API_KEY # Key is read from this environment variable
+GEMINI_API_KEY = settings.OPENAI_API_KEY 
 
 # -------------------------
-# Attachment helpers (unchanged)
+# Attachment helpers (unchanged from final version)
 # -------------------------
 def verify_secret(secret_from_request: str) -> bool:
     return secret_from_request == settings.STUDENT_SECRET
 
 async def process_attachment_for_llm(attachment_url: str) -> Optional[dict]:
-    # (Simplified for brevity, but assumes the logic that returns mimeType and data bytes)
     if not attachment_url or not attachment_url.startswith(("data:", "http")):
         logger.warning(f"Invalid attachment URL: {attachment_url}")
         return None
@@ -180,15 +171,13 @@ async def save_generated_files_locally(task_id: str, files: dict) -> str:
     return task_dir
 
 async def save_attachments_locally(task_dir: str, attachments: List[Attachment]) -> List[str]:
-    # (Unchanged logic for saving raw attachment files)
     saved = []
     async with httpx.AsyncClient(timeout=30) as client:
         for att in attachments:
             try:
                 if att.url.startswith("data:"):
                     m = re.search(r"base64,(.*)", att.url, re.IGNORECASE)
-                    if not m:
-                        continue
+                    if not m: continue
                     data = base64.b64decode(m.group(1))
                 else:
                     resp = await client.get(att.url)
@@ -200,12 +189,9 @@ async def save_attachments_locally(task_dir: str, attachments: List[Attachment])
                 logger.info(f"Saved attachment {att.name}")
             except Exception as e:
                 logger.exception(f"Failed to save attachment {att.name}: {e}")
-    flush_logs()
-    return saved
-
+    flush_logs(); return saved
 
 def remove_local_path(path: str):
-    # (Unchanged robust cleanup logic)
     if not os.path.exists(path): return
     logger.info(f"Removing local path {path}")
     def _try_rmtree(p):
@@ -230,11 +216,9 @@ def remove_local_path(path: str):
 
 # Git helpers (unchanged)
 async def setup_local_repo(local_path: str, repo_name: str, repo_url_auth: str, repo_url_http: str, round_index: int) -> git.Repo:
-    gh_user = settings.GITHUB_USERNAME
-    gh_token = settings.GITHUB_TOKEN
+    gh_user = settings.GITHUB_USERNAME; gh_token = settings.GITHUB_TOKEN
     headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
-    should_clone = (round_index > 1)
-    creation_succeeded = False
+    should_clone = (round_index > 1); creation_succeeded = False
     if round_index == 1:
         async with httpx.AsyncClient(timeout=60) as client:
             try:
@@ -242,38 +226,30 @@ async def setup_local_repo(local_path: str, repo_name: str, repo_url_auth: str, 
                 r = await client.post(f"{settings.GITHUB_API_BASE}/user/repos", json=payload, headers=headers)
                 if r.status_code == 201: creation_succeeded = True
                 elif r.status_code == 422:
-                    msg = r.json().get("message", "")
+                    msg = r.json().get("message", "");
                     if "already exists" in msg: should_clone = True
                     else: r.raise_for_status()
                 else: r.raise_for_status()
-            except Exception as e:
-                logger.exception(f"Repo create error: {e}"); raise
+            except Exception as e: logger.exception(f"Repo create error: {e}"); raise
     if should_clone or (round_index > 1 and not creation_succeeded):
         try:
             repo = await asyncio.to_thread(git.Repo.clone_from, repo_url_auth, local_path)
             logger.info("Cloned repo"); return repo
-        except Exception as e:
-            logger.exception(f"Clone failed: {e}"); raise
+        except Exception as e: logger.exception(f"Clone failed: {e}"); raise
     else:
-        repo = git.Repo.init(local_path)
-        repo.create_remote('origin', repo_url_auth)
+        repo = git.Repo.init(local_path); repo.create_remote('origin', repo_url_auth)
         logger.info("Initialized local repo"); return repo
 
 async def commit_and_publish(repo: git.Repo, task_id: str, round_index: int, repo_name: str) -> dict:
-    gh_user = settings.GITHUB_USERNAME
-    gh_token = settings.GITHUB_TOKEN
+    gh_user = settings.GITHUB_USERNAME; gh_token = settings.GITHUB_TOKEN
     repo_url_http = f"https://github.com/{gh_user}/{repo_name}"
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             await asyncio.to_thread(repo.git.add, A=True)
-            msg = f"Task {task_id} - Round {round_index}"
-            commit = await asyncio.to_thread(lambda m: repo.index.commit(m), msg)
-            commit_sha = getattr(commit, "hexsha", "")
-            await asyncio.to_thread(lambda *args: repo.git.branch(*args), '-M', 'main')
-            await asyncio.to_thread(lambda r: r.git.push('--set-upstream', 'origin', 'main', force=True), repo)
-            await asyncio.sleep(2)
-            pages_api = f"{settings.GITHUB_API_BASE}/repos/{gh_user}/{repo_name}/pages"
-            payload = {"source": {"branch": "main", "path": "/"}}
+            msg = f"Task {task_id} - Round {round_index}"; commit = await asyncio.to_thread(lambda m: repo.index.commit(m), msg)
+            commit_sha = getattr(commit, "hexsha", ""); await asyncio.to_thread(lambda *args: repo.git.branch(*args), '-M', 'main')
+            await asyncio.to_thread(lambda r: r.git.push('--set-upstream', 'origin', 'main', force=True), repo); await asyncio.sleep(2)
+            pages_api = f"{settings.GITHUB_API_BASE}/repos/{gh_user}/{repo_name}/pages"; payload = {"source": {"branch": "main", "path": "/"}}
             for attempt in range(5):
                 try:
                     resp = await client.get(pages_api, headers={"Authorization": f"token {gh_token}"})
@@ -285,11 +261,9 @@ async def commit_and_publish(repo: git.Repo, task_id: str, round_index: int, rep
                     if e.response.status_code == 422 and "main branch must exist" in text and attempt < 4:
                         await asyncio.sleep(2 ** attempt); continue
                     raise
-            await asyncio.sleep(5)
-            pages_url = f"{settings.GITHUB_PAGES_BASE}/{repo_name}/"
+            await asyncio.sleep(5); pages_url = f"{settings.GITHUB_PAGES_BASE}/{repo_name}/"
             return {"repo_url": repo_url_http, "commit_sha": commit_sha, "pages_url": pages_url}
-        except Exception as e:
-            logger.exception(f"Commit/publish failed: {e}"); raise
+        except Exception as e: logger.exception(f"Commit/publish failed: {e}"); raise
 
 # LLM wrapper is now Gemini native (using the key stored in OPENAI_API_KEY)
 async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[dict]) -> dict:
@@ -297,7 +271,9 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
     system_prompt = (
         "You are an expert full-stack web engineer. You must use the `generate_files_for_model` tool to return "
         "the required files. Your primary goal is to create a single-file, clean, professional web application.\n\n"
-        # ... (rest of the prompt remains the same) ...
+        # --- CRITICAL PROMPT FIX ---
+        "You MUST return the content using the generate_files_for_model tool. You must not use any other function or return any natural language text. Respond ONLY with the requested tool call."
+        # --- END CRITICAL PROMPT FIX ---
         "IMPORTANT: If the brief or user asks for handling a ?url=... parameter or a remote image URL, implement the following behavior in the generated index.html:\n"
         " - Detect a URL parameter named 'url' (e.g., ?url=https://.../image.png). If present, attempt to load that image into an <img> element with crossOrigin='anonymous'.\n"
         " - Use a robust client-side OCR fallback using Tesseract.js (via CDN). Attempt OCR on the loaded image and store the OCRed text.\n"
@@ -313,12 +289,9 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
         " index.html: single-file HTML using Tailwind CDN + vanilla JS + Tesseract.js via CDN. Must reference any attached image file by filename in the root (./<name>) and include base64 fallback.\n"
         " README.md: describe the app, mention attachment usage, and Live Demo link.\n"
         " LICENSE: MIT with [year] and [author].\n"
-        "You MUST return the content using the generate_files_for_model tool. Do not generate any text or code outside the tool call."
     )
 
     content_parts: List[types.Part] = [system_prompt]
-    
-    # Add initial text prompt
     content_parts.append(prompt)
     
     # Add attachments (images and text blocks)
@@ -331,11 +304,9 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
             content_parts.append(part["text"])
 
     try:
-        # Initialize the Gemini client using the environment variable (settings.OPENAI_API_KEY)
         client = genai.Client(api_key=settings.OPENAI_API_KEY)
     except Exception as e:
-        logger.error(f"Gemini client init failed: {e}")
-        raise
+        logger.error(f"Gemini client init failed: {e}"); raise
 
     max_retries = 3
     for attempt in range(max_retries):
@@ -344,7 +315,7 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
                 model=GEMINI_MODEL,
                 contents=content_parts,
                 config=types.GenerateContentConfig(
-                    tools=[generate_files_for_model], # Pass the Python callable directly
+                    tools=[generate_files_for_model], 
                     temperature=0.0
                 )
             )
@@ -352,10 +323,8 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
             if response.function_calls:
                 function_call = response.function_calls[0]
                 if function_call.name == "generate_files_for_model":
-                    # Function arguments are structured data
                     generated = dict(function_call.args)
                     
-                    # Basic validation and key standardization
                     final_files = {}
                     for model_key, deploy_key in [("index_html", "index.html"), ("readme_md", "README.md"), ("license", "LICENSE")]:
                         if model_key not in generated:
@@ -382,140 +351,85 @@ async def call_llm_for_code(prompt: str, task_id: str, attachment_parts: List[di
 # Notify (unchanged)
 async def notify_evaluation_server(evaluation_url: str, email: str, task_id: str, round_index: int, nonce: str, repo_url: str, commit_sha: str, pages_url: str) -> bool:
     if not evaluation_url or "example.com" in evaluation_url or evaluation_url.strip()=="":
-        logger.warning("Skipping notify due to invalid URL")
-        return False
+        logger.warning("Skipping notify due to invalid URL"); return False
     payload = {"email":email,"task":task_id,"round":round_index,"nonce":nonce,"repo_url":repo_url,"commit_sha":commit_sha,"pages_url":pages_url}
     max_retries = 3
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.post(evaluation_url, json=payload)
-                r.raise_for_status()
-                logger.info("Notify succeeded")
-                return True
+                r = await client.post(evaluation_url, json=payload); r.raise_for_status()
+                logger.info("Notify succeeded"); return True
         except Exception as e:
             logger.warning(f"Notify attempt {attempt+1} failed: {e}")
-            if attempt < max_retries-1:
-                await asyncio.sleep(2 ** attempt)
-    logger.error("Notify failed after retries")
-    return False
+            if attempt < max_retries-1: await asyncio.sleep(2 ** attempt)
+    logger.error("Notify failed after retries"); return False
 
 # Main orchestration (unchanged)
 async def generate_files_and_deploy(task_data: TaskRequest):
     acquired = False
     try:
-        await task_semaphore.acquire()
-        acquired = True
+        await task_semaphore.acquire(); acquired = True
         logger.info(f"Start task {task_data.task} round {task_data.round}")
-        task_id = task_data.task
-        round_index = task_data.round
-        brief = task_data.brief
-        attachments = task_data.attachments or []
-
-        repo_name = task_id.replace(" ","-").lower()
-        gh_user = settings.GITHUB_USERNAME
-        gh_token = settings.GITHUB_TOKEN
+        task_id = task_data.task; round_index = task_data.round; brief = task_data.brief; attachments = task_data.attachments or []
+        repo_name = task_id.replace(" ","-").lower(); gh_user = settings.GITHUB_USERNAME; gh_token = settings.GITHUB_TOKEN
         repo_url_auth = f"https://{gh_user}:{gh_token}@github.com/{gh_user}/{repo_name}.git"
         repo_url_http = f"https://github.com/{gh_user}/{repo_name}"
-
-        base_dir = os.path.join(os.getcwd(),"generated_tasks")
-        local_path = os.path.join(base_dir, task_id)
+        base_dir = os.path.join(os.getcwd(),"generated_tasks"); local_path = os.path.join(base_dir, task_id)
 
         if os.path.exists(local_path):
-            try:
-                await asyncio.to_thread(remove_local_path, local_path)
-            except Exception as e:
-                logger.exception(f"Cleanup failed: {e}")
-                raise
+            try: await asyncio.to_thread(remove_local_path, local_path)
+            except Exception as e: logger.exception(f"Cleanup failed: {e}"); raise
 
         safe_makedirs(local_path)
-
         repo = await setup_local_repo(local_path, repo_name, repo_url_auth, repo_url_http, round_index)
-
-        # Process attachments and build metadata summary for LLM
-        attachment_parts: List[dict] = []
-        attachment_meta_lines = []
+        attachment_parts: List[dict] = []; attachment_meta_lines = []
         for att in attachments:
-            # attempt to fetch and convert to inlineData (bytes) or text
             part = await process_attachment_for_llm(att.url)
-            if part:
-                attachment_parts.append(part)
-            # build meta
-            lower = att.name.lower()
-            kind = "image" if lower.endswith((".png",".jpg",".jpeg",".gif")) else "file"
+            if part: attachment_parts.append(part)
+            lower = att.name.lower(); kind = "image" if lower.endswith((".png",".jpg",".jpeg",".gif")) else "file"
             attachment_meta_lines.append(f"{att.name} ({kind}) - url: {att.url}")
         if attachment_meta_lines:
             meta_text = "ATTACHMENTS METADATA:\n" + "\n".join(attachment_meta_lines)
-            # include metadata as text block
             attachment_parts.append({"type": "text", "text": meta_text})
 
-        # Build user prompt: round aware and mention attachments by name
         if round_index > 1:
-            llm_prompt = (
-                f"UPDATE (ROUND {round_index}): Make minimal edits to existing project to implement: {brief}. "
-                "Preserve structure and style. Provide full replacement content for index.html, README.md, LICENSE."
-            )
+            llm_prompt = (f"UPDATE (ROUND {round_index}): Make minimal edits to existing project to implement: {brief}. " "Preserve structure and style. Provide full replacement content for index.html, README.md, LICENSE.")
         else:
-            llm_prompt = (
-                f"CREATE (ROUND {round_index}): Build a complete single-file responsive Tailwind web app for: {brief}. "
-                "Provide index.html, README.md, and MIT LICENSE. If attachments are included, incorporate them."
-            )
+            llm_prompt = (f"CREATE (ROUND {round_index}): Build a complete single-file responsive Tailwind web app for: {brief}. " "Provide index.html, README.md, and MIT LICENSE. If attachments are included, incorporate them.")
         if attachment_meta_lines:
             llm_prompt += "\n\n" + "Provided attachments:\n" + "\n".join(attachment_meta_lines)
 
         generated_files = await call_llm_for_code(llm_prompt, task_id, attachment_parts)
-
-        # Save generated files locally
         task_dir = await save_generated_files_locally(task_id, generated_files)
-
-        # Save attachments into the same repo dir
         saved_names = await save_attachments_locally(task_dir, attachments)
-
-        # Commit & push
         deployment = await commit_and_publish(repo, task_id, round_index, repo_name)
-        repo_url = deployment["repo_url"]
-        commit_sha = deployment["commit_sha"]
-        pages_url = deployment["pages_url"]
+        repo_url = deployment["repo_url"]; commit_sha = deployment["commit_sha"]; pages_url = deployment["pages_url"]
         logger.info(f"Deployed: {pages_url}")
 
-        # Notify evaluator (skip example.com)
         await notify_evaluation_server(task_data.evaluation_url, task_data.email, task_id, round_index, task_data.nonce, repo_url, commit_sha, pages_url)
 
-    except Exception as e:
-        logger.exception(f"Task failed: {e}")
+    except Exception as e: logger.exception(f"Task failed: {e}")
     finally:
-        if acquired:
-            task_semaphore.release()
+        if acquired: task_semaphore.release()
         flush_logs()
 
-# Background callback, Endpoints, etc. are unchanged
+# Background callback, Endpoints, Keepalive, Shutdown (all unchanged)
 def _task_done_callback(task: asyncio.Task):
     try:
         exc = task.exception()
-        if exc:
-            logger.error(f"Background task exception: {exc}")
-        else:
-            logger.info("Background task finished successfully")
-    except asyncio.CancelledError:
-        logger.warning("Background task cancelled")
-    finally:
-        flush_logs()
+        if exc: logger.error(f"Background task exception: {exc}")
+        else: logger.info("Background task finished successfully")
+    except asyncio.CancelledError: logger.warning("Background task cancelled")
+    finally: flush_logs()
 
-# Endpoints
 @app.post("/ready", status_code=200)
 async def receive_task(task_data: TaskRequest, background_tasks: BackgroundTasks, request: Request):
     global last_received_task, background_tasks_list
-    if not verify_secret(task_data.secret):
-        logger.warning("Unauthorized attempt")
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not verify_secret(task_data.secret): raise HTTPException(status_code=401, detail="Unauthorized")
     last_received_task = {"task": task_data.task, "round": task_data.round, "brief": (task_data.brief[:250]+"...") if len(task_data.brief)>250 else task_data.brief, "time": datetime.utcnow().isoformat()+"Z"}
     bg = asyncio.create_task(generate_files_and_deploy(task_data))
-    bg.add_done_callback(_task_done_callback)
-    background_tasks_list.append(bg)
-    # keepalive no-op
-    background_tasks.add_task(lambda: None)
-    logger.info(f"Received task {task_data.task}")
-    flush_logs()
+    bg.add_done_callback(_task_done_callback); background_tasks_list.append(bg); background_tasks.add_task(lambda: None)
+    logger.info(f"Received task {task_data.task}"); flush_logs()
     return JSONResponse(status_code=200, content={"status":"processing_scheduled","task":task_data.task})
 
 @app.get("/")
@@ -524,8 +438,7 @@ async def root():
 
 @app.get("/status")
 async def status():
-    if last_received_task:
-        return {"last_received_task": last_received_task, "running_background_tasks": len([t for t in background_tasks_list if not t.done()])}
+    if last_received_task: return {"last_received_task": last_received_task, "running_background_tasks": len([t for t in background_tasks_list if not t.done()])}
     return {"message":"No tasks yet."}
 
 @app.get("/health")
@@ -535,36 +448,23 @@ async def health():
 @app.get("/logs")
 async def get_logs(lines: int = Query(200, ge=1, le=5000)):
     path = settings.LOG_FILE_PATH
-    if not os.path.exists(path):
-        return PlainTextResponse("Log file not found.", status_code=404)
+    if not os.path.exists(path): return PlainTextResponse("Log file not found.", status_code=404)
     try:
         with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            buf = bytearray()
-            block = 1024
+            f.seek(0, os.SEEK_END); size = f.tell(); buf = bytearray(); block = 1024
             while size > 0 and len(buf) < lines * 2000:
-                read_size = min(block, size)
-                f.seek(size - read_size)
-                buf.extend(f.read(read_size))
-                size -= read_size
-            text = buf.decode(errors="ignore").splitlines()
-            last_lines = "\n".join(text[-lines:])
+                read_size = min(block, size); f.seek(size - read_size); buf.extend(f.read(read_size)); size -= read_size
+            text = buf.decode(errors="ignore").splitlines(); last_lines = "\n".join(text[-lines:])
             return PlainTextResponse(last_lines)
     except Exception as e:
-        logger.exception(f"Logs read failed: {e}")
-        return PlainTextResponse(f"Error: {e}", status_code=500)
+        logger.exception(f"Logs read failed: {e}"); return PlainTextResponse(f"Error: {e}", status_code=500)
 
-# Keepalive & shutdown
 @app.on_event("startup")
 async def startup_event():
     async def keepalive():
         while True:
-            try:
-                logger.info("[KEEPALIVE] heartbeat")
-                flush_logs()
-            except Exception:
-                pass
+            try: logger.info("[KEEPALIVE] heartbeat"); flush_logs()
+            except Exception: pass
             await asyncio.sleep(settings.KEEP_ALIVE_INTERVAL_SECONDS)
     asyncio.create_task(keepalive())
 
@@ -573,9 +473,6 @@ async def shutdown_event():
     logger.info("Shutdown: cancel background tasks")
     for t in background_tasks_list:
         if not t.done():
-            try:
-                t.cancel()
-            except Exception:
-                pass
-    await asyncio.sleep(0.5)
-    flush_logs()
+            try: t.cancel()
+            except Exception: pass
+    await asyncio.sleep(0.5); flush_logs()
