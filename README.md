@@ -4,7 +4,7 @@ Tds project 1
 
 This project implements a fully autonomous API endpoint designed to receive a task brief, use a Large Language Model (LLM) to generate a functional web application, deploy it to GitHub Pages, and notify an external evaluation service. It supports both initial deployment (Round 1) and feature revision (Round 2).
 
-The application is deployed on **Hugging Face Spaces (Docker SDK)** to ensure a persistent, publicly accessible service as required for evaluation.
+The application is deployed on **Render** to ensure a persistent, publicly accessible service as required for evaluation.
 
 ---
 
@@ -12,13 +12,12 @@ The application is deployed on **Hugging Face Spaces (Docker SDK)** to ensure a 
 
 | Component | Status | Details |
 | :--- | :--- | :--- |
-| **Live API Endpoint** | **Active** | `https://aryanjha2711-llm-deployement.hf.space/ready` |
+| **Live API Endpoint** | **Active** | `https://tds-project1-8hnp.onrender.com/' |
 | **Deployment User** | `22f3000879` | All generated projects are deployed under this GitHub account. |
-| **API Documentation** | Available | `https://aryanjha2711-llm-deployement.hf.space/docs` |
 
 ### Key Features
 * **Asynchronous Processing:** Handles task requests instantly (HTTP 200) and executes long-running deployment tasks in the background using FastAPI and `asyncio`.
-* **Secure Configuration:** Uses environment variables (secured via Hugging Face Secrets) for all sensitive credentials (`GITHUB_TOKEN`, `OPENAI_API_KEY`, `STUDENT_SECRET`).
+* **Secure Configuration:** Uses environment variables (secured via Render Environment Variables) for all sensitive credentials (`GITHUB_TOKEN`, `OPENAI_API_KEY`, `STUDENT_SECRET`).
 * **LLM Tooling:** Employs OpenAI's function calling feature to force the LLM to output precise, validated JSON structures containing `index.html`, `README.md`, and `LICENSE`.
 * **Robust Deployment:** Automates repository creation, Git committing, and GitHub Pages activation/update using `GitPython` and the GitHub REST API.
 * **Resilient Notification:** Implements **exponential backoff** for retrying the final notification to the instructor's `evaluation_url`.
