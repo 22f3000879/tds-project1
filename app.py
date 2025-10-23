@@ -339,6 +339,11 @@ async def receive_task(task_data: TaskRequest, background_tasks: BackgroundTasks
     logger.info(f"Received task {task_data.task}")
     flush_logs()
     return JSONResponse(status_code=200, content={"status":"processing_scheduled","task":task_data.task})
+    # New endpoint: allow POST to "/" as well
+@app.post("/", status_code=200)
+async def root_post(task_data: TaskRequest, background_tasks: BackgroundTasks, request: Request):
+    return await receive_task(task_data, background_tasks, request)
+
 
 @app.get("/")
 async def root():
