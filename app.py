@@ -332,17 +332,30 @@ def _task_done_callback(task: asyncio.Task):
 @app.post("/ready", status_code=200)
 async def receive_task(task_data: TaskRequest, background_tasks: BackgroundTasks, request: Request):
     global last_received_task, background_tasks_list
-    if not verify_secret(task_data.secret): raise HTTPException(status_code=401, detail="Unauthorized")
-    last_received_task = {"task": task_data.task, "round": task_data.round, "brief": task_data.brief[:250], "time": datetime.utcnow().isoformat()+"Z"}
+    if not verify_secret(task_data.secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    last_received_task = {
+        "task": task_data.task,
+        "round": task_data.round,
+        "brief": task_data.brief[:250],
+        "time": datetime.utcnow().isoformat()+"Z"
+    }
     bg = asyncio.create_task(generate_files_and_deploy(task_data))
-    bg.add_done_callback(_task_done_callback); background_tasks_list.append(bg); background_tasks.add_task(lambda: None)
+    bg.add_done_callback(_task_done_callback)
+    background_tasks_list.append(bg)
+    background_tasks.add_task(lambda: None)
     logger.info(f"Received task {task_data.task}")
     flush_logs()
-    return JSONResponse(status_code=200, content={"status":"processing_scheduled","task":task_data.task})
-    # New endpoint: allow POST to "/" as well
+    return JSONResponse(
+        status_code=200,
+        content={"status": "processing_scheduled", "task": task_data.task}
+    )
+
+# 👇 THIS MUST BE AT ROOT LEVEL, NOT INDENTED INSIDE THE ABOVE FUNCTION
 @app.post("/", status_code=200)
 async def root_post(task_data: TaskRequest, background_tasks: BackgroundTasks, request: Request):
     return await receive_task(task_data, background_tasks, request)
+
 
 
 @app.get("/")
